@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RinnePad self-check</title>
+<link rel="icon" href="data:,">
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+</head>
+<body style="font-family:monospace">
+<h3>RinnePad self-check</h3>
+<pre id="result">running...</pre>
+<script type="module">
+import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs';
+import { exportPdf, canvasTextToPng, FONTS, frameVecs } from './pdf-export.js';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs';
+const { PDFDocument, degrees, StandardFonts } = PDFLib;
+const out = document.getElementById('result');
+const log = []; let failed = 0;
+const check = (name, ok, info = '') => { if (!ok) failed++; log.push(`${ok ? 'ok  ' : 'FAIL'} ${name} ${info}`); };
+const near = (a, b, t = 0.5) => Math.abs(a - b) <= t;
+const open = (b) => pdfjsLib.getDocument({ data: b.slice(), isEvalSupported: false }).promise;
+const textOf = async (pg) => (await pg.getTextContent()).items;
+
+// sample: n pages, page k labelled PAGE-<k>, MediaBox with non-zero origin, CropBox inside, /Rotate r
+async function sample(n, rot = 0) {
+  const d = await PDFDocument.create(), f = await d.embedFont(StandardFonts.Helvetica);
+  for (let k = 0; k < n; k++) {
+    const p = d.addPage([612, 792]);
+    p.setMediaBox(10, 20, 500, 700); p.setCropBox(50, 60, 400, 500);
+    p.setRotation(degrees(rot));
+    p.drawText('PAGE-' + k, { x: 100, y: 100, size: 20, font: f });
+  }
+  return new Uint8Array(await d.save());
+}
+const imgs = new Map();
+const opts = { textToPng: (s) => canvasTextToPng(document, s) };
+
+try {
+  // 1. viewport round trip
+  for (const r of [0, 90, 180, 270]) {
+    const doc = await open(await sample(1, r)), pg = await doc.getPage(1);
+    const vp = pg.getViewport({ scale: 1.7, rotation: pg.rotate });
+    let ok = true;
+    for (const P of [[50, 60], [400, 500], [123.4, 321.5], [60, 480]]) {
+      const s = vp.convertToViewportPoint(...P), Q = vp.convertToPdfPoint(...s);
+      if (!near(Q[0], P[0], 1e-6) || !near(Q[1], P[1], 1e-6)) ok = false;
+      if (s[0] < -1e-6 || s[1] < -1e-6 || s[0] > vp.width + 1e-6 || s[1] > vp.height + 1e-6) ok = false;
+    }
+    const ll = vp.convertToViewportPoint(50, 60), W = vp.width, H = vp.height;
+    const exp = { 0: [0, H], 90: [0, 0], 180: [W, 0], 270: [W, H] }[r];
+    check(`round trip /Rotate ${r}, CropBox origin (50,60)`, ok && near(ll[0], exp[0], 1e-6) && near(ll[1], exp[1], 1e-6));
+  }
+
+  // 2. reorder/delete/rotation/page count, content on right page
+  {
+    const b = await sample(3, 90);
+    const pages = [
+      { origIndex: 2, delta: 90, annots: [{ id: 'a', type: 'text', text: 'MARK', x: 120, y: 200, rot: 180, font: 'Helvetica', size: 18, color: '#ff0000', w: 50, h: 22 }] },
+      { origIndex: 0, delta: 0, annots: [] },
+    ];
+    const res = await exportPdf(PDFLib, b, pages, imgs, opts);
+    const doc = await open(res);
+    check('page count after delete (3 -> 2)', doc.numPages === 2, 'got ' + doc.numPages);
+    const p1 = await doc.getPage(1), p2 = await doc.getPage(2);
+    const t1 = (await textOf(p1)).map((i) => i.str).join('|'), t2 = (await textOf(p2)).map((i) => i.str).join('|');
+    check('reorder: first page is original page 3 with MARK', t1.includes('PAGE-2') && t1.includes('MARK'), t1);
+    check('reorder: second page is original page 1', t2.includes('PAGE-0') && !t2.includes('MARK'), t2);
+    check('rotation written (90+90=180)', p1.rotate === 180 && p2.rotate === 90, `${p1.rotate},${p2.rotate}`);
+  }
+
+  // 2a. attributes inherited from an intermediate /Pages node survive reorder + delete
+  {
+    const { PDFName } = PDFLib;
+    const d = await PDFDocument.create(), f = await d.embedFont(StandardFonts.Helvetica);
+    for (let k = 0; k < 4; k++) d.addPage([612, 792]).drawText('P' + k, { x: 100, y: 100, font: f, size: 20 });
+    const ctx = d.context, root = d.catalog.lookup(PDFName.of('Pages')), rootRef = d.catalog.get(PDFName.of('Pages')), pgs = d.getPages();
+    const res = pgs[0].node.get(PDFName.of('Resources'));
+    const mid = ctx.register(ctx.obj({ Type: 'Pages', Kids: pgs.map((p) => p.ref), Count: 4, Parent: rootRef, MediaBox: [0, 0, 300, 400], Resources: res, Rotate: 90 }));
+    root.set(PDFName.of('Kids'), ctx.obj([mid]));
+    for (const p of pgs) { p.node.set(PDFName.of('Parent'), mid); p.node.delete(PDFName.of('MediaBox')); p.node.delete(PDFName.of('Resources')); }
+    const b = new Uint8Array(await d.save());
+    const doc = await open(await exportPdf(PDFLib, b, [3, 1, 0, 2].map((i) => ({ origIndex: i, delta: 0, annots: [] })), imgs, opts));
+    let good = doc.numPages === 4, info = [];
+    for (let n = 1; n <= 4; n++) { const pg = await doc.getPage(n); info.push(`${pg.view[2]}x${pg.view[3]}/${pg.rotate}`); good = good && pg.view[2] === 300 && pg.view[3] === 400 && pg.rotate === 90 && (await textOf(pg)).some((i) => i.str === 'P' + [3, 1, 0, 2][n - 1]); }
+    const doc2 = await open(await exportPdf(PDFLib, b, [3, 1].map((i) => ({ origIndex: i, delta: 0, annots: [] })), imgs, opts));
+    const pg2 = await doc2.getPage(2);
+    check('inherited MediaBox/Rotate survive reorder+delete (3-level tree)', good && doc2.numPages === 2 && pg2.view[2] === 300 && pg2.rotate === 90, info.join(' '));
+  }
+
+  // 2b. blank pages: index, size, annotation after reorder + delete, rotation
+  {
+    const b = await sample(3, 0), bl = (annots, delta = 0) => ({ blank: true, width: 300, height: 200, delta, annots });
+    const mark = { id: 'b', type: 'text', text: 'BLANKMARK', x: 40, y: 120, rot: 0, font: 'Helvetica', size: 16, color: '#000000', w: 100, h: 20 };
+    let doc = await open(await exportPdf(PDFLib, b, [{ origIndex: 0, delta: 0, annots: [] }, bl([]), { origIndex: 1, delta: 0, annots: [] }, { origIndex: 2, delta: 0, annots: [] }], imgs, opts));
+    let pg = await doc.getPage(2);
+    check('blank between originals: index 2 of 4, size 300x200', doc.numPages === 4 && near(pg.view[2] - pg.view[0], 300, 0.01) && near(pg.view[3] - pg.view[1], 200, 0.01) && !(await textOf(pg)).length);
+    check('neighbours intact', (await textOf(await doc.getPage(3))).some((i) => i.str === 'PAGE-1'));
+    // reorder + delete another page: [orig2, orig0 (delete orig1), blank w/ annot rotated]
+    doc = await open(await exportPdf(PDFLib, b, [{ origIndex: 2, delta: 0, annots: [] }, bl([mark], 90), { origIndex: 0, delta: 0, annots: [] }], imgs, opts));
+    pg = await doc.getPage(2);
+    const it = (await textOf(pg)).find((i) => i.str === 'BLANKMARK');
+    check('annotation on blank lands on blank after reorder+delete', doc.numPages === 3 && it && near(it.transform[4], 40, 0.01) && pg.rotate === 90 && (await textOf(await doc.getPage(1))).some((i) => i.str === 'PAGE-2') && !(await textOf(await doc.getPage(3))).some((i) => i.str === 'BLANKMARK'), it ? it.transform.join() : 'missing');
+  }
+
+  // 3. Thai text must not throw and becomes an image
+  {
+    const b = await sample(1, 0);
+    const pages = [{ origIndex: 0, delta: 0, annots: [{ id: 't', type: 'text', text: 'สวัสดีชาวโลก\nline2 ✓', x: 100, y: 300, rot: 0, font: 'Helvetica', size: 20, color: '#000000', w: 160, h: 48 }] }];
+    const warns = [];
+    let threw = null, res;
+    try { res = await exportPdf(PDFLib, b, pages, imgs, { ...opts, onWarn: (m) => warns.push(m) }); } catch (e) { threw = e; }
+    check('Thai text annotation does not throw', !threw && res, threw && threw.message);
+    if (res) {
+      const pg = await (await open(res)).getPage(1);
+      const ops = await pg.getOperatorList();
+      check('Thai text embedded as image', ops.fnArray.includes(pdfjsLib.OPS.paintImageXObject) && !warns.length, warns.join());
+    }
+  }
+
+  // 4. exported text lands where the preview model says (all rotations, CropBox/MediaBox offsets)
+  for (const r of [0, 90, 180, 270]) {
+    const b = await sample(1, r), size = 24, x = 150.5, y = 400.25;
+    const f = FONTS.Helvetica, { d } = frameVecs(r);
+    const res = await exportPdf(PDFLib, b, [{ origIndex: 0, delta: 0, annots: [{ id: 'x', type: 'text', text: 'HELLO-RINNE', x, y, rot: r, font: 'Helvetica', size, color: '#000000', w: 150, h: 29 }] }], imgs, opts);
+    const pg = await (await open(res)).getPage(1);
+    const it = (await textOf(pg)).find((i) => i.str.includes('HELLO'));
+    const ex = x + d[0] * f.base * size, ey = y + d[1] * f.base * size;
+    check(`text baseline at expected point, page /Rotate ${r}`, it && near(it.transform[4], ex, 0.5) && near(it.transform[5], ey, 0.5),
+      it ? `got ${it.transform[4].toFixed(2)},${it.transform[5].toFixed(2)} want ${ex.toFixed(2)},${ey.toFixed(2)}` : 'text missing');
+  }
+
+  // 5. every shape type exports without error (incl. highlight multiply blend)
+  {
+    const b = await sample(1, 0);
+    const c = '#336699';
+    const annots = [
+      { id: '1', type: 'highlight', x: 90, y: 90, w: 100, h: 30, color: '#facc15' },
+      { id: '2', type: 'rect', x: 100, y: 200, w: 50, h: 40, color: c, width: 2 },
+      { id: '3', type: 'ellipse', x: 100, y: 250, w: 50, h: 40, color: c, width: 2 },
+      { id: '4', type: 'line', p1: [10, 10], p2: [90, 90], color: c, width: 2 },
+      { id: '5', type: 'arrow', p1: [10, 10], p2: [90, 40], color: c, width: 2 },
+      { id: '6', type: 'pen', pts: [[200, 200], [210, 220], [230, 215]], color: c, width: 2 },
+      { id: '7', type: 'whiteout', x: 300, y: 300, w: 30, h: 30, color: '#ffffff' },
+    ];
+    const warns = [];
+    const res = await exportPdf(PDFLib, b, [{ origIndex: 0, delta: 0, annots }], imgs, { ...opts, onWarn: (m) => warns.push(m) });
+    check('all shape types export', res.length > 0 && !warns.length, warns.join());
+    const pg = await (await open(res)).getPage(1);
+    check('highlight keeps underlying text', (await textOf(pg)).some((i) => i.str.includes('PAGE-0')));
+  }
+} catch (e) {
+  check('self-check ran without exception', false, e.stack || e.message);
+}
+out.textContent = log.join('\n') + '\n' + (failed ? `FAIL (${failed})` : 'PASS');
+document.title = failed ? 'FAIL' : 'PASS';
+</script>
+</body>
+</html>
