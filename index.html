@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RinnePad - Web & PDF Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-900 text-slate-100 h-screen flex flex-col overflow-hidden">
+    <!-- Header -->
+    <header class="bg-slate-800 border-b border-slate-700 px-6 py-3 flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+            <div class="bg-indigo-600 text-white p-2 rounded-lg font-bold flex items-center justify-center w-10 h-10">
+                <i class="fa-solid fa-pen-nib"></i>
+            </div>
+            <div>
+                <h1 class="text-lg font-semibold tracking-wide">RinnePad</h1>
+                <p class="text-xs text-slate-400">Web Markdown & PDF Editor</p>
+            </div>
+        </div>
+        <div class="flex items-center space-x-3">
+            <button id="btn-new" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-sm rounded-md transition flex items-center space-x-1.5">
+                <i class="fa-solid fa-file"></i><span>New</span>
+            </button>
+            <label class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-sm rounded-md transition cursor-pointer flex items-center space-x-1.5">
+                <i class="fa-solid fa-folder-open"></i><span>Open</span>
+                <input type="file" id="file-input" class="hidden" accept=".md,.txt,.html">
+            </label>
+            <button id="btn-download" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-sm rounded-md transition flex items-center space-x-1.5">
+                <i class="fa-solid fa-download"></i><span>Save .md</span>
+            </button>
+            <button id="btn-pdf" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-sm font-medium rounded-md transition flex items-center space-x-1.5 shadow-lg">
+                <i class="fa-solid fa-file-pdf"></i><span>Export PDF</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Editor Area -->
+    <div class="flex-1 flex overflow-hidden">
+        <!-- Editor Pane -->
+        <div class="w-1/2 flex flex-col border-r border-slate-700 bg-slate-900">
+            <div class="bg-slate-800/50 px-4 py-2 text-xs font-medium text-slate-400 border-b border-slate-800 flex justify-between items-center">
+                <span>MARKDOWN EDITOR</span>
+                <span id="word-count">0 words</span>
+            </div>
+            <textarea id="editor" class="flex-1 p-6 bg-slate-900 text-slate-100 font-mono text-sm resize-none focus:outline-none leading-relaxed" placeholder="# Start writing your document here..."></textarea>
+        </div>
+
+        <!-- Preview Pane -->
+        <div class="w-1/2 flex flex-col bg-slate-950">
+            <div class="bg-slate-800/50 px-4 py-2 text-xs font-medium text-slate-400 border-b border-slate-800">
+                LIVE PREVIEW
+            </div>
+            <div id="preview" class="flex-1 p-8 overflow-y-auto prose prose-invert max-w-none text-slate-200"></div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-slate-900 border-t border-slate-800 px-6 py-2 text-xs text-slate-500 flex justify-between">
+        <div>RinnePad v1.0.0 • Hosted on GitHub Pages</div>
+        <div id="status-msg" class="text-indigo-400">Ready</div>
+    </footer>
+
+    <script>
+        const editor = document.getElementById('editor');
+        const preview = document.getElementById('preview');
+        const wordCountEl = document.getElementById('word-count');
+        const statusMsg = document.getElementById('status-msg');
+
+        // Load saved content from localStorage or default template
+        const defaultContent = `# RinnePad Document
+
+Welcome to **RinnePad**, your high-performance web and PDF editor created by Rinne for Aki.
+
+## Features
+- **Live Markdown Preview**: Type markdown on the left, see rendered HTML on the right.
+- **Local Storage**: Your work is automatically saved in your browser storage as you type.
+- **PDF Export**: Convert your documents into clean PDF files instantly.
+- **File Management**: Open local `.md` or `.txt` files and save your work anytime.
+
+> "Simplicity is the soul of efficiency."
+`;
+
+        editor.value = localStorage.getItem('rinnepad_content') || defaultContent;
+
+        function update() {
+            const val = editor.value;
+            preview.innerHTML = marked.parse(val);
+            localStorage.setItem('rinnepad_content', val);
+            
+            // Word count
+            const words = val.trim() ? val.trim().split(/\s+/).length : 0;
+            const chars = val.length;
+            wordCountEl.textContent = `${words} words (${chars} chars)`;
+        }
+
+        editor.addEventListener('input', update);
+        update();
+
+        // New Document
+        document.getElementById('btn-new').addEventListener('click', () => {
+            if (confirm('Create a new document? Unsaved changes will be lost.')) {
+                editor.value = '# New Document\n\n';
+                update();
+                statusMsg.textContent = 'New document created';
+                setTimeout(() => statusMsg.textContent = 'Ready', 3000);
+            }
+        });
+
+        // Open File
+        document.getElementById('file-input').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                editor.value = e.target.result;
+                update();
+                statusMsg.textContent = `Opened: ${file.name}`;
+                setTimeout(() => statusMsg.textContent = 'Ready', 3000);
+            };
+            reader.readAsText(file);
+        });
+
+        // Download Markdown
+        document.getElementById('btn-download').addEventListener('click', () => {
+            const blob = new Blob([editor.value], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'document.md';
+            a.click();
+            URL.revokeObjectURL(url);
+            statusMsg.textContent = 'Markdown saved';
+            setTimeout(() => statusMsg.textContent = 'Ready', 3000);
+        });
+
+        // Export PDF using jsPDF
+        document.getElementById('btn-pdf').addEventListener('click', () => {
+            statusMsg.textContent = 'Generating PDF...';
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({
+                unit: 'pt',
+                format: 'a4'
+            });
+
+            // Strip markdown formatting for simple text rendering or render HTML text
+            const text = preview.innerText;
+            
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(12);
+            
+            const margin = 40;
+            const pageWidth = doc.internal.pageSize.getWidth();
+            const pageHeight = doc.internal.pageSize.getHeight();
+            const maxLineWidth = pageWidth - (margin * 2);
+            
+            const lines = doc.splitTextToSize(text, maxLineWidth);
+            
+            let cursorY = margin;
+            const lineHeight = 18;
+
+            for (let i = 0; i < lines.length; i++) {
+                if (cursorY + lineHeight > pageHeight - margin) {
+                    doc.addPage();
+                    cursorY = margin;
+                }
+                doc.text(lines[i], margin, cursorY);
+                cursorY += lineHeight;
+            }
+
+            doc.save('rinnepad-document.pdf');
+            statusMsg.textContent = 'PDF exported successfully!';
+            setTimeout(() => statusMsg.textContent = 'Ready', 3000);
+        });
+    </script>
+</body>
+</html>
